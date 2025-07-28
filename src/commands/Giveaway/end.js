@@ -25,7 +25,7 @@ module.exports = {
     if (!GiveawayData) {
       return context.createMessage({
         content: "💥 I could not find any active giveaway with the provided ID!",
-        ephemeral: true,
+        flags: 64,
       });
     }
 
@@ -33,7 +33,7 @@ module.exports = {
 
     return context.createMessage({
       content: `The giveaway for **${GiveawayData.prize}** has ended. Winners have been announced in <#${GiveawayData.channelId}>.`,
-      ephemeral: true,
+      flags: 64,
     });
   },
 };

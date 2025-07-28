@@ -28,7 +28,7 @@ module.exports = {
     if(!GiveawayData) {
         return context.createMessage({
             content: `💥 I could not find any giveaway!`,
-            ephemeral: true,
+            flags: 64,
           });
     }
     if (winnerCount) {
@@ -39,14 +39,14 @@ module.exports = {
     if (GiveawayData.participants.length < GiveawayData.winnersCount) {
       return context.createMessage({
         content: `Not enough participants to pick ${winnersToPick} winners.`,
-        ephemeral: true,
+        flags: 64,
       });
     }
     await client.util.rerollGiveawayEmbed(giveawayId, GiveawayData);
 
     return context.createMessage({
       content: `Rerolled.`,
-      ephemeral: true,
+      flags: 64,
     });
   },
 };

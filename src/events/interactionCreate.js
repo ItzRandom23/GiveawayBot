@@ -73,7 +73,7 @@ module.exports = async (client, interaction) => {
       if (interaction.commandName === "list") {
         await interaction.deferReply();
       } else if (interaction.commandName !== "create") {
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: 64 });
       }
 
       if (

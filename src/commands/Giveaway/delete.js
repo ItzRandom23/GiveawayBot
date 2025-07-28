@@ -21,7 +21,7 @@ module.exports = {
     if(!GiveawayData) {
         return context.createMessage({
             content: `💥 I could not find any giveaway!`,
-            ephemeral: true,
+            flags: 64,
           });
     }
    await GiveawayData.deleteOne({ messageId: giveawayId });
@@ -38,7 +38,7 @@ module.exports = {
     }
     return context.createMessage({
       content: `The giveaway for **${GiveawayData.prize}** has ended. Winners have been announced in <#${GiveawayData.channelId}>.`,
-      ephemeral: true,
+      flags: 64,
     });
   },
 };

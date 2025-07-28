@@ -23,7 +23,7 @@ module.exports = {
       if (!colorRegex.test(colorOption)) {
         return context.createMessage({
           content: "💥 Please provide a valid hex color code (e.g., #FF5733).",
-          ephemeral: true,
+          flags: 64,
         });
       }
 

@@ -1,5 +1,5 @@
 module.exports = {
-  TOKEN: "",
-  MongoDB: "",
-  dev: "",
+  TOKEN: "", // Bot Token
+  MongoDB: "", // MongoDB 
+  dev: "", // ID of Owner 
 };

@@ -7,9 +7,9 @@ const {
 } = require("discord.js");
 const data = require("../models/Guild");
 const gwdata = require("../models/GiveawayData");
+
 class Util {
   /**
-   *
    * @param {import('./Client')} client
    */
   constructor(client) {
@@ -17,7 +17,7 @@ class Util {
   }
 
   /**
-   * Adds or removes the user from the giveaway based on button interaction.
+   * Handles giveaway button interaction
    * @param {import('discord.js').ButtonInteraction} interaction
    * @param {string} giveawayId
    */
@@ -26,261 +26,185 @@ class Util {
     if (!GiveawayData) {
       return interaction.reply({
         content: "Giveaway not found!",
-        ephemeral: true,
+        flags: 64,
       });
     }
 
+    const guildSettings = await data.findOne({ id: interaction.guildId }) || {};
     const userId = interaction.user.id;
+    const isParticipating = GiveawayData.participants.includes(userId);
+    const update = isParticipating
+      ? { $pull: { participants: userId }, $inc: { entryCount: -1 } }
+      : { $push: { participants: userId }, $inc: { entryCount: 1 } };
 
-    if (GiveawayData.participants.includes(userId)) {
-      GiveawayData.participants = GiveawayData.participants.filter(
-        (id) => id !== userId
-      );
-      GiveawayData.entryCount -= 1;
-      await GiveawayData.save();
-      interaction.reply({
-        content: "You have left the giveaway!",
-        ephemeral: true,
-      });
-    } else {
-      GiveawayData.participants.push(userId);
-      GiveawayData.entryCount += 1;
-      await GiveawayData.save();
-      interaction.reply({
-        content: "You have entered the giveaway!",
-        ephemeral: true,
-      });
-    }
+    const updatedGiveawayData = await gwdata.findOneAndUpdate(
+      { messageId: giveawayId },
+      update,
+      { new: true }
+    );
 
-    this.updateGiveawayEmbed(giveawayId, GiveawayData);
+    await interaction.reply({
+      content: isParticipating
+        ? "You have left the giveaway!"
+        : "You have entered the giveaway!",
+      flags: 64,
+    });
+
+    this.updateGiveawayEmbed(
+      giveawayId,
+      updatedGiveawayData,
+      guildSettings.embedColor || "#0000FF"
+    );
   }
 
-  async updateGiveawayEmbed(giveawayId, GiveawayData) {
-    const channel = await this.client.channels.fetch(GiveawayData.channelId);
-    const message = await channel.messages.fetch(giveawayId);
-    const guildData = await data.findOne({ id: GiveawayData.id });
-    if (GiveawayData.description) {
-      const embed = new EmbedBuilder()
-        .setColor(guildData.embedColor)
-        .setTitle(`**${GiveawayData.prize}**`)
-        .setDescription(
-          `${GiveawayData.description}\n\nEnds: <t:${Math.floor(
-            GiveawayData.endTime / 1000
-          )}:R> (<t:${Math.floor(
-            GiveawayData.endTime / 1000
-          )}:f>)\nHosted by: <@${GiveawayData.hostId}>\nEntries: **${GiveawayData.entryCount
-          }**\nWinners: **${GiveawayData.winnersCount}**`
-        )
-        .setTimestamp();
-
-      await message.edit({ embeds: [embed] });
-    } else {
-      const embed = new EmbedBuilder()
-        .setColor(guildData.embedColor)
-        .setTitle(`**${GiveawayData.prize}**`)
-        .setDescription(
-          `Ends: <t:${Math.floor(
-            GiveawayData.endTime / 1000
-          )}:R> (<t:${Math.floor(
-            GiveawayData.endTime / 1000
-          )}:f>)\nHosted by: <@${GiveawayData.hostId}>\nEntries: **${GiveawayData.entryCount
-          }**\nWinners: **${GiveawayData.winnersCount}**`
-        )
-        .setTimestamp();
-
-      await message.edit({ embeds: [embed] });
-    }
-  }
-
-  async  fetchMessageByApi(client, channelId, messageId) {
+  async updateGiveawayEmbed(giveawayId, GiveawayData, embedColor = "#0000FF") {
     try {
-      
-      const response = await client.rest.get(`/channels/${channelId}/messages/${messageId}`);
-      
-      const message = new Message(client, response, client.channels.cache.get(channelId));
-      
-      return message;
-    } catch (error) {
-      if (error?.message && error.message.includes('Unknown Message')) {
-        console.log(`Message with ID ${messageId} no longer exists.`);
-        return null; 
-      }
- 
-      console.error("Error fetching message by API:", error);
-      return null; 
-    }
-  }
-  
-
-  async checkGiveawayEnd(giveawayId) {
-    const GiveawayData = await gwdata.findOne({ messageId: giveawayId });
-
-    if (!GiveawayData || !GiveawayData.isActive) return;
-
-    const channel = await this.client.channels.fetch(GiveawayData.channelId).catch(() => null);
-    if (!channel) {
-      console.log(`Channel with ID ${GiveawayData.channelId} no longer exists. Deleting giveaway.`);
-      await GiveawayData.deleteOne();
-      return;
-    }
-
-    try {
-
-      const message = await this.fetchMessageByApi(this.client, GiveawayData.channelId, GiveawayData.messageId);
-
-      if (!message) {
-        console.log(`Message with ID ${GiveawayData.messageId} no longer exists. Deleting giveaway.`);
-        await GiveawayData.deleteOne();
-        console.log("Deleted giveaway document successfully.");
+      const { channelId } = GiveawayData._doc || GiveawayData;
+      if (!channelId) {
+        console.error(`Channel ID is undefined for giveaway ${giveawayId}`);
         return;
       }
 
-      const currentTime = Date.now();
-      if (currentTime >= GiveawayData.endTime) {
-        GiveawayData.isActive = false;
-        await GiveawayData.save();
-
-        await this.endGiveawayEmbed(giveawayId, GiveawayData);
-      }
+      const channel = await this.client.channels.fetch(channelId);
+      const message = await channel.messages.fetch(giveawayId);
+      const embed = this.createGiveawayEmbed(GiveawayData, embedColor);
+      await message.edit({ embeds: [embed] });
     } catch (error) {
-      console.error("Error fetching message:", error);
+      console.error(`Failed to update giveaway embed ${giveawayId}:`, error);
     }
+  }
+
+  async fetchMessageByApi(client, channelId, messageId) {
+    try {
+      const response = await client.rest.get(
+        `/channels/${channelId}/messages/${messageId}`
+      );
+      return new Message(client, response, client.channels.cache.get(channelId));
+    } catch (error) {
+      console.log(
+        error.message?.includes("Unknown Message")
+          ? `Message ${messageId} no longer exists`
+          : `Error fetching message ${messageId}: ${error}`
+      );
+      return null;
+    }
+  }
+
+  async checkGiveawayEnd(giveawayId) {
+    const GiveawayData = await gwdata.findOne({ messageId: giveawayId });
+    if (!GiveawayData?.isActive) return;
+    if (Date.now() < GiveawayData.endTime) return;
+
+    const channel = await this.client.channels.fetch(GiveawayData.channelId).catch(() => null);
+    if (!channel) return;
+
+    const message = await this.fetchMessageByApi(this.client, GiveawayData.channelId, giveawayId);
+    if (!message) return;
+
+    await gwdata.updateOne({ messageId: giveawayId }, { isActive: false });
+    await this.endGiveawayEmbed(giveawayId, GiveawayData);
+  }
+
+  createGiveawayEmbed(GiveawayData, color, winners = "") {
+    const { prize, endTime, hostId, entryCount, winnersCount } = GiveawayData._doc || GiveawayData;
+
+    if (!prize || !endTime || !hostId) {
+      console.error("Invalid GiveawayData structure:", GiveawayData);
+      return new EmbedBuilder()
+        .setColor("#FF0000")
+        .setTitle("Error: Invalid Giveaway Data")
+        .setDescription("There was an issue retrieving giveaway details.");
+    }
+
+    const endTimestamp = Math.floor(endTime / 1000);
+
+    return new EmbedBuilder()
+      .setColor(color)
+      .setTitle(`**${prize}**`)
+      .setDescription(
+        `Ends: <t:${endTimestamp}:R> (<t:${endTimestamp}:f>)\n` +
+        `Hosted by: <@${hostId}>\n` +
+        `Entries: **${entryCount ?? 0}**\n` +
+        `Winners: **${winners || winnersCount}**`
+      )
+      .setTimestamp();
+  }
+
+  createDisabledButtonRow(giveawayEmoji = "🎉") {
+    return new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("giveawayEnded")
+        .setStyle(ButtonStyle.Primary)
+        .setEmoji(giveawayEmoji)
+        .setDisabled(true)
+    );
   }
 
   async endGiveawayEmbed(giveawayId, GiveawayData) {
-    const channel = await this.client.channels.fetch(GiveawayData.channelId);
-    const message = await channel.messages.fetch(giveawayId);
-    const guildData = await data.findOne({ id: GiveawayData.id });
-    const endTime = Date.now();
-    GiveawayData.isActive = false;
-    await GiveawayData.save();
-    if (GiveawayData.participants.length === 0) {
-      const embed = new EmbedBuilder()
-        .setColor("#313338")
-        .setTitle(`**${GiveawayData.prize}**`)
-        .setDescription(
-          `Ends: <t:${Math.floor(endTime / 1000)}:R> (<t:${Math.floor(
-          endTime / 1000
-        )}:f>)\nHosted by: <@${GiveawayData.hostId}>\nEntries: **${GiveawayData.entryCount
-          }**\nWinners: `
-        )
-        .setTimestamp();
+    try {
+      const channel = await this.client.channels.fetch(GiveawayData.channelId);
+      const message = await channel.messages.fetch(giveawayId);
 
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId("giveawayEnded")
-          .setStyle(ButtonStyle.Primary)
-          .setEmoji(guildData.giveawayEmoji)
-          .setDisabled(true)
+      const guildSettings = await data.findOne({ id: message.guildId }) || {};
+      const winnersData = this.getWinners(GiveawayData);
+
+      const embed = this.createGiveawayEmbed(
+        GiveawayData,
+        guildSettings.embedColor || "#313338",
+        winnersData.winners
       );
+      const row = this.createDisabledButtonRow(guildSettings.giveawayEmoji || "🎉");
 
       await message.edit({ embeds: [embed], components: [row] });
-
       await message.reply({
-        content: `No valid entrants, so a winner could not be determined!`,
+        content: winnersData.winners
+          ? `Congratulations ${winnersData.winners}! You won **${GiveawayData.prize}**!`
+          : "No valid entrants, so a winner could not be determined!",
       });
-    } else {
-      const winnerIds = GiveawayData.participants
-        .sort(() => Math.random() - 0.5)
-        .slice(0, GiveawayData.winnersCount);
-
-      const winnerMentions = winnerIds.map((id) => `<@${id}>`).join(", ");
-
-      const embed = new EmbedBuilder()
-        .setColor("#313338")
-        .setTitle(`**${GiveawayData.prize}**`)
-        .setDescription(
-          `Ends: <t:${Math.floor(
-            GiveawayData.endTime / 1000
-          )}:R> (<t:${Math.floor(
-            GiveawayData.endTime / 1000
-          )}:f>)\nHosted by: <@${GiveawayData.hostId}>\nEntries: **${GiveawayData.entryCount
-          }**\nWinners: **${winnerMentions}**`
-        )
-        .setTimestamp();
-
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId("giveawayEnded")
-          .setStyle(ButtonStyle.Primary)
-          .setEmoji(guildData.giveawayEmoji)
-          .setDisabled(true)
-      );
-
-      await message.edit({ embeds: [embed], components: [row] });
-
-      await message.reply({
-        content: `Congratulations ${winnerMentions}! You won **${GiveawayData.prize}**!`,
-      });
+    } catch (error) {
+      console.error(`Failed to end giveaway ${giveawayId}:`, error);
     }
   }
 
-  async rerollGiveawayEmbed(giveawayId, GiveawayData) {
-    const channel = await this.client.channels.fetch(GiveawayData.channelId);
-    const message = await channel.messages.fetch(giveawayId);
-    const guildData = await data.findOne({ id: GiveawayData.id });
-    await GiveawayData.save();
-    if (GiveawayData.participants.length === 0) {
-      const embed = new EmbedBuilder()
-        .setColor("#313338")
-        .setTitle(`**${GiveawayData.prize}**`)
-        .setDescription(
-          `Ends: <t:${Math.floor(
-            GiveawayData.endTime / 1000
-          )}:R> (<t:${Math.floor(
-            GiveawayData.endTime / 1000
-          )}:f>)\nHosted by: <@${GiveawayData.hostId}>\nEntries: **${GiveawayData.entryCount
-          }**\nWinners: `
-        )
-        .setTimestamp();
+  async rerollGiveawayEmbed(giveawayId, GiveawayData, winnersToPick) {
+    try {
+      const channel = await this.client.channels.fetch(GiveawayData.channelId);
+      const message = await channel.messages.fetch(giveawayId);
 
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId("giveawayEnded")
-          .setStyle(ButtonStyle.Primary)
-          .setEmoji(guildData.giveawayEmoji)
-          .setDisabled(true)
+      const guildSettings = await data.findOne({ id: message.guildId }) || {};
+      const winnersData = this.getWinners(GiveawayData, winnersToPick);
+
+      const embed = this.createGiveawayEmbed(
+        GiveawayData,
+        guildSettings.embedColor || "#313338",
+        winnersData.winners
       );
+      const row = this.createDisabledButtonRow(guildSettings.giveawayEmoji || "🎉");
 
       await message.edit({ embeds: [embed], components: [row] });
-
       await message.reply({
-        content: `No valid entrants, so a winner could not be determined!`,
+        content: winnersData.winners
+          ? `Rerolled the giveaway! New winner(s) are ${winnersData.winners}!`
+          : "No valid entrants, so a winner could not be determined!",
       });
-    } else {
-      const winnerIds = GiveawayData.participants
-        .sort(() => Math.random() - 0.5)
-        .slice(0, GiveawayData.winnersCount);
-
-      const winnerMentions = winnerIds.map((id) => `<@${id}>`).join(", ");
-
-      const embed = new EmbedBuilder()
-        .setColor("#313338")
-        .setTitle(`**${GiveawayData.prize}**`)
-        .setDescription(
-          `Ends: <t:${Math.floor(
-            GiveawayData.endTime / 1000
-          )}:R> (<t:${Math.floor(
-            GiveawayData.endTime / 1000
-          )}:f>)\nHosted by: <@${GiveawayData.hostId}>\nEntries: **${GiveawayData.entryCount
-          }**\nWinners: **${winnerMentions}**`
-        )
-        .setTimestamp();
-
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId("giveawayEnded")
-          .setStyle(ButtonStyle.Primary)
-          .setEmoji(guildData.giveawayEmoji)
-          .setDisabled(true)
-      );
-
-      await message.edit({ embeds: [embed], components: [row] });
-
-      await message.reply({
-        content: `Rerolled the giveaway! New winner(s) are ${winnerMentions}!`,
-      });
+    } catch (error) {
+      console.error(`Failed to reroll giveaway ${giveawayId}:`, error);
     }
+  }
+
+  getWinners(GiveawayData, winnersToPick) {
+    if (!GiveawayData.participants.length) return { winners: "" };
+
+    const count = Math.min(
+      winnersToPick || GiveawayData.winnersCount,
+      GiveawayData.participants.length
+    );
+
+    const winnerIds = GiveawayData.participants
+      .sort(() => Math.random() - 0.5)
+      .slice(0, count);
+
+    return { winners: winnerIds.map((id) => `<@${id}>`).join(", ") };
   }
 
   async parseDuration(duration) {
@@ -307,7 +231,7 @@ class Util {
       case "d":
         return amount * 86400; // days to seconds
       default:
-        return null; // invalid unit
+        return null;
     }
   }
 

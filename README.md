@@ -1,35 +1,90 @@
-<center><img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&height=200&section=header&text=GiveawayBot&fontSize=80&fontAlignY=35&animation=twinkling&fontColor=gradient" /></center>
+<p align="center">
+  <img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&height=200&section=header&text=GiveawayBot&fontSize=80&fontAlignY=35&animation=twinkling&fontColor=gradient" alt="GiveawayBot Banner"/>
+</p>
+
+# GiveawayBot
+
+A modern, easy-to-use Discord bot for hosting and managing giveaways, inspired by the original GiveawayBot#2381. Built with [discord.js](https://discord.js.org/) and [mongoose](https://mongoosejs.com/).
+
+---
+
+## Features
+
+- 🎉 Start, end, reroll, and delete giveaways with simple commands
+- 🏆 Interactive giveaway creation with modals
+- 🖌️ Customizable embed color and emoji
+- 📋 List all active giveaways with pagination
+- ⚡ Fast, scalable, and sharding-ready
+- 🛡️ Permission checks and robust error handling
+
+---
 
 ## Installation
 
-To install and run the bot locally, follow these steps:
+### 1. Clone the repository
 
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/ItzRandom23/GiveawayBot.git
-   ```
+```sh
+git clone https://github.com/ItzRandom23/GiveawayBot.git
+cd GiveawayBot
+```
 
-2. **Navigate to the repository directory:**
-   ```bash
-   cd GiveawayBot
-   ```
+### 2. Install dependencies
 
-3. **Install the dependencies:**
-   ```bash
-   npm install
-   ```
-4. **Fill in the details in `Settings.js`:**
-   - Open the `Settings.js` file.
-   - Add your bot token and MongoDB connection string:
-   ```javascript
-   TOKEN: "your-bot-token-here",
-   MongoDB: "your-mongodb-connection-string-here",
-5. **Start the bot:**
-   ```bash
-   npm start
-   ```
+```sh
+npm install
+```
 
-## Note
-This code is having some bugs use if you can fix them ( related to ephemeral messages in discord.js )  - March 2025
+### 3. Configure your settings
 
-Okay I am back guys i will fix this code soon this month - May 2025
+Edit [`settings.js`](settings.js) and fill in your bot token, MongoDB connection string, and owner ID:
+
+```js
+module.exports = {
+  TOKEN: "your-bot-token-here",
+  MongoDB: "your-mongodb-connection-string-here",
+  dev: "your-discord-user-id-here",
+};
+```
+
+### 4. Start the bot
+
+```sh
+npm start
+```
+
+---
+
+## Usage
+
+Invite your bot to your server using the OAuth2 link (replace `YOUR_CLIENT_ID`):
+
+```
+https://discord.com/oauth2/authorize?permissions=347200&scope=bot+applications.commands&client_id=YOUR_CLIENT_ID
+```
+
+Use `/help` in your server to see all available commands.
+
+---
+
+## Commands
+
+- `/start` — Start a giveaway
+- `/create` — Interactive giveaway creation
+- `/end` — End an active giveaway
+- `/delete` — Delete a giveaway
+- `/reroll` — Reroll winners
+- `/list` — List active giveaways
+- `/settings` — Show current settings
+- `/setcolor` — Set embed color
+- `/setemoji` — Set giveaway emoji
+- `/about`, `/ping`, `/invite`, `/help` — Info & utility
+
+---
+
+## Support & Contributing
+
+- [Source Code](https://github.com/ItzRandom23/GiveawayBot)
+- [Support Server](https://discord.gg/yfhtR5RJ)
+
+Feel free to open issues or pull requests!
+

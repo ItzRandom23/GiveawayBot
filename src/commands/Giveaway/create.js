@@ -82,7 +82,7 @@ module.exports = {
         return modalInteraction.reply({
           content:
             "Invalid duration format! Use formats like `1h`, `30m`, `2d`.",
-          ephemeral: true,
+          flags: 64,
         });
       }
 
@@ -132,13 +132,13 @@ module.exports = {
 
       await modalInteraction.reply({
         content: `Giveaway successfully created! **ID:** ${message.id}`,
-        ephemeral: true,
+        flags: 64,
       });
     } catch (err) {
       console.error(`Error handling modal submission: ${err}`);
       return context.followUp({
         content: "You did not submit the form in time!",
-        ephemeral: true,
+        flags: 64,
       });
     }
   },

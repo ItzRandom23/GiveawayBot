@@ -22,7 +22,7 @@ module.exports = {
     if (!emojiOption.match(emojiRegex) && emojiOption.length > 2) {
       return context.createMessage({
         content: "❌ Please provide a valid emoji (e.g., 🎉 or :trophy:).",
-        ephemeral: true,
+        flags: 64,
       });
     }
 

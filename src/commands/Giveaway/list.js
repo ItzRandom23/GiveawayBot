@@ -19,7 +19,7 @@ module.exports = {
             .setColor("Red")
             .setDescription(`❌ There are no active giveaways in this server.`),
         ],
-        ephemeral: true,
+        flags: 64,
       });
     }
     let pagesNum = Math.ceil(activeGiveaways.length / 10);
