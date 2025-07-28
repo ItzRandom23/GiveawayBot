@@ -84,7 +84,12 @@ Use `/help` in your server to see all available commands.
 ## Support & Contributing
 
 - [Source Code](https://github.com/ItzRandom23/GiveawayBot)
-- [Support Server](https://discord.gg/yfhtR5RJ)
+- [Support Server](https://discord.gg/6jP4G5kdUc)
 
 Feel free to open issues or pull requests!
 
+---
+
+## License
+
+This project is licensed under
