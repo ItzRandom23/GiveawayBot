@@ -92,4 +92,4 @@ Feel free to open issues or pull requests!
 
 ## License
 
-This project is licensed under
+This project is licensed under the [MIT License](LICENSE).
