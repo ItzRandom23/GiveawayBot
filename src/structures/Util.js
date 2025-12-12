@@ -76,19 +76,27 @@ class Util {
 
   async fetchMessageByApi(client, channelId, messageId) {
     try {
-      const response = await client.rest.get(
-        `/channels/${channelId}/messages/${messageId}`
-      );
-      return new Message(client, response, client.channels.cache.get(channelId));
+        const response = await client.rest.get(
+            `/channels/${channelId}/messages/${messageId}`
+        );
+
+        return new Message(client, response, client.channels.cache.get(channelId));
+
     } catch (error) {
-      console.log(
-        error.message?.includes("Unknown Message")
-          ? `Message ${messageId} no longer exists`
-          : `Error fetching message ${messageId}: ${error}`
-      );
-      return null;
+        const isUnknown =
+            error.message?.includes("Unknown Message") ||
+            error.code === 10008; 
+
+        if (isUnknown) {
+            console.log(`Message ${messageId} no longer exists. Deleting DB entry...`);
+            await gwdata.deleteOne({ messageId });
+
+        } else {
+            console.log(`Error fetching message ${messageId}: ${error}`);
+        }
+        return null;
     }
-  }
+}
 
   async checkGiveawayEnd(giveawayId) {
     const GiveawayData = await gwdata.findOne({ messageId: giveawayId });
