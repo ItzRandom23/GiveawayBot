@@ -30,13 +30,19 @@ cd GiveawayBot
 
 ### 2. Install dependencies
 
+Use a supported Node.js LTS release and MongoDB 6 or newer. Run the install command from the repository root.
+
 ```sh
-npm install
+npm ci
 ```
+
+If you installed v1.0.3, remove the old generated `src/node_modules` directory before installing from the root.
 
 ### 3. Configure your settings
 
-Edit [`settings.js`](settings.js) and fill in your bot token, MongoDB connection string, and owner ID:
+Set `DISCORD_TOKEN` and `MONGODB_URI` in the environment. `DISCORD_OWNER_IDS` optionally accepts a comma-separated list of Discord user IDs.
+
+You can also fill in the existing [`settings.js`](settings.js) file. Keep Discord IDs quoted to preserve every digit.
 
 ```js
 module.exports = {
@@ -59,10 +65,12 @@ npm start
 Invite your bot to your server using the OAuth2 link (replace `YOUR_CLIENT_ID`):
 
 ```
-https://discord.com/oauth2/authorize?permissions=347200&scope=bot+applications.commands&client_id=YOUR_CLIENT_ID
+https://discord.com/oauth2/authorize?permissions=274877991936&scope=bot+applications.commands&client_id=YOUR_CLIENT_ID
 ```
 
 Use `/help` in your server to see all available commands.
+
+The giveaway post displays the saved result. Winner pings are best-effort. If Discord's response is ambiguous, the bot keeps the result and avoids another ping.
 
 ---
 
