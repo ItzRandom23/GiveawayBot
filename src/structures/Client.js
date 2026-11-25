@@ -1,180 +1,120 @@
-const {
-  ActivityType,
-  Client,
-  Collection,
-  GatewayIntentBits,
-  Message,
-  Sweepers,
-} = require("discord.js");
-const { ClusterClient } = require("discord-hybrid-sharding");
+const { readdirSync } = require("node:fs");
+const { join } = require("node:path");
+const { ActivityType, Client, Collection, Events, GatewayIntentBits, Options, Partials } = require("discord.js");
+const { ClusterClient, getInfo } = require("discord-hybrid-sharding");
 const mongoose = require("mongoose");
-const { readdirSync } = require("fs");
-const settings = require("../../settings");
 const Util = require("./Util");
+const { logError } = require("./config");
 const checkGiveawayEnd = require("../events/checkGiveawayEnd");
+const handleInteraction = require("../events/interactionCreate");
+const registerCommands = require("../events/ready");
+const { startCreationRecovery } = require("./GiveawayCreation");
+const { removeDeletedGiveaways } = require("./GiveawayLifecycle");
+const { startMessageReconciliation, removeDeletedChannel } = require("./GiveawayReconciliation");
+const GiveawayCreation = require("../models/GiveawayCreation");
+const GiveawayData = require("../models/GiveawayData");
+const Guild = require("../models/Guild");
 
 class GiveawayBot extends Client {
-  /**
-   * @type ClusterClient
-   */
-  cluster;
-  constructor() {
+  constructor(config) {
+    const { SHARD_LIST, TOTAL_SHARDS } = getInfo();
     super({
-      allowedMentions: {
-        parse: ["users", "roles", "everyone"],
-        repliedUser: false,
-      },
-      intents: [GatewayIntentBits.Guilds],
-      presence: {
-        activities: [
-          {
-            name: `🎉 Hosting Giveaways`,
-            type: ActivityType.Custom,
-          },
-        ],
-      },
-
-      shards: ClusterClient.getInfo().SHARD_LIST,
-      shardCount: ClusterClient.getInfo().TOTAL_SHARDS,
+      allowedMentions: { parse: [], repliedUser: false },
+      intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.GuildExpressions],
+      partials: [Partials.Message],
+      makeCache: Options.cacheWithLimits({ ...Options.DefaultMakeCacheSettings, MessageManager: 0 }),
+      presence: { activities: [{ name: "🎉 Hosting Giveaways", type: ActivityType.Custom }] },
+      shards: SHARD_LIST,
+      shardCount: TOTAL_SHARDS,
     });
 
     this.cluster = new ClusterClient(this);
-    this.events = new Collection();
     this.commands = new Collection();
-    this.settings = settings;
-    this.owners = this.settings.dev;
+    this.config = config;
+    this.owners = config.owners;
     this.util = new Util(this);
+    this.commandRegistration = new AbortController();
   }
 
-  setupCustomSweepers() {
-    setInterval(() => {
-      const amount = this.sweepers.sweepMessages(
-        Sweepers.filterByLifetime({
-          lifetime: 1800,
-          getComparisonTimestamp: (m) =>
-            m.editedTimestamp ?? m.createdTimestamp,
-        })()
-      );
-    }, 3600000);
-
-    setInterval(() => {
-      const amount = this.sweepers.sweepGuildMembers(
-        Sweepers.filterByLifetime({
-          lifetime: 2100,
-          getComparisonTimestamp: (m) => m.joinedTimestamp,
-          excludeFromSweep: (m) => m.id === this.user.id,
-        })()
-      );
-    }, 3600000);
-
-    setInterval(() => {
-      const amount = this.sweepers.sweepInvites(
-        Sweepers.filterByLifetime({
-          lifetime: 1800,
-          getComparisonTimestamp: (invite) => invite.createdTimestamp,
-        })()
-      );
-    }, 3600000);
-  }
-
-  build() {
-    let commandsCount = 0;
-    readdirSync("./src/commands").forEach((category) => {
-      readdirSync(`./src/commands/${category}`).forEach((command) => {
-        commandsCount++;
-        this.commands.set(command.split(".")[0], {
-          ...require(`../commands/${category}/${command}`),
-          category,
-        });
-      });
-    });
-    let eventsCount = 0;
-    readdirSync("./src/events").forEach((event) => {
-      eventsCount++;
-      this.events.set(event.split(".")[0], require(`../events/${event}`));
-      this[`on${event === "ready.js" ? "ce" : ""}`](
-        event.split(".")[0],
-        (...args) => this.events.get(event.split(".")[0])(this, ...args)
-      );
-    });
-
-    this.login(this.settings.TOKEN);
-    mongoose.connect(this.settings.MongoDB, {
-      useUnifiedTopology: true,
-      useNewUrlParser: true,
-      maxPoolSize: 6,
-      minPoolSize: 1,
-      connectTimeoutMS: 10000,
-      retryWrites: true,
-    });
-    if (this.cluster.id === 0) {
-      console.log(`➜     Loaded ${commandsCount} commands.`);
-      console.log(`➜     Loaded ${eventsCount} events.`);
+  loadCommands() {
+    const commandsDir = join(__dirname, "..", "commands");
+    for (const category of readdirSync(commandsDir, { withFileTypes: true })) {
+      if (!category.isDirectory()) continue;
+      const directory = join(commandsDir, category.name);
+      for (const file of readdirSync(directory, { withFileTypes: true })) {
+        if (!file.isFile() || !file.name.endsWith(".js")) continue;
+        const command = require(join(directory, file.name));
+        if (this.commands.has(command.name)) throw new Error("Duplicate command " + command.name);
+        this.commands.set(command.name, { ...command, category: category.name });
+      }
     }
-    this.once("ready", async (client) => {
-      checkGiveawayEnd(client);
-      this.setupCustomSweepers();
+  }
+
+  async build() {
+    this.loadCommands();
+    this.on(Events.Error, (error) => logError("Discord client", error));
+    this.on(Events.ShardError, (error) => logError("Discord shard", error));
+    this.on(Events.InteractionCreate, async (interaction) => {
+      try {
+        await handleInteraction(this, interaction);
+      } catch (error) {
+        logError("Interaction handler", error);
+      }
     });
+    const removeGiveaways = (guildId, channelId, messageIds) => {
+      if (!guildId) return;
+      removeDeletedGiveaways(guildId, channelId, messageIds)
+        .catch((error) => logError("Deleted giveaway cleanup", error));
+    };
+    this.on(Events.MessageDelete, (message) => {
+      removeGiveaways(message.guildId, message.channelId, [message.id]);
+    });
+    this.on(Events.MessageBulkDelete, (messages, channel) => {
+      removeGiveaways(channel.guildId, channel.id, [...messages.keys()]);
+    });
+    const removeChannelGiveaways = (channel) => {
+      if (!channel.guildId) return;
+      removeDeletedChannel(channel.guildId, channel.id)
+        .catch((error) => logError("Deleted channel cleanup", error));
+    };
+    this.on(Events.ChannelDelete, removeChannelGiveaways);
+    this.on(Events.ThreadDelete, removeChannelGiveaways);
+    this.once(Events.ClientReady, async () => {
+      try {
+        this.cluster.triggerReady();
+        console.log("Cluster #" + this.cluster.id + " is online with " + this.commands.size + " commands.");
+        this.stopGiveawayScheduler = checkGiveawayEnd(this);
+        this.stopCreationRecovery = startCreationRecovery(this);
+        this.stopMessageReconciliation = startMessageReconciliation(this);
+        await registerCommands(this, { signal: this.commandRegistration.signal });
+      } catch (error) {
+        logError("Discord ready handler", error);
+      }
+    });
+
+    mongoose.connection.on("error", (error) => logError("MongoDB connection", error));
+    await mongoose.connect(this.config.mongoUri, {
+      bufferCommands: false,
+      maxPoolSize: 6,
+      serverSelectionTimeoutMS: 10_000,
+      waitQueueTimeoutMS: 10_000,
+      socketTimeoutMS: 30_000,
+    });
+    await Promise.all([GiveawayCreation.init(), GiveawayData.init(), Guild.init()]);
+    await this.login(this.config.token);
     return this;
   }
 
-  /**
-   * @param {string} channelId
-   * @param {import("discord.js").MessageCreateOptions} options
-   */
-  async createMessage(channelId, options) {
-    return new Message(
-      this,
-      await fetch(
-        `https://discord.com/api/v10/channels/${channelId}/messages`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bot ${this.settings.TOKEN}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(options),
-        }
-      ).then((response) => response.json())
-    );
-  }
-
-  /**
-   * @param {string} channelId
-   * @param {string} messageId
-   */
-  async deleteMessage(channelId, messageId) {
-    await fetch(
-      `https://discord.com/api/v10/channels/${channelId}/messages/${messageId}`,
-      {
-        method: "DELETE",
-        headers: {
-          Authorization: `Bot ${this.settings.TOKEN}`,
-        },
-      }
-    );
-  }
-
-  /**
-   * @param {string} channelId
-   * @param {string} messageId
-   * @param {import("discord.js").MessageEditOptions} options
-   */
-  async editMessage(channelId, messageId, options) {
-    return new Message(
-      this,
-      await fetch(
-        `https://discord.com/api/v10/channels/${channelId}/messages/${messageId}`,
-        {
-          method: "PATCH",
-          headers: {
-            Authorization: `Bot ${this.settings.TOKEN}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(options),
-        }
-      ).then((response) => response.json())
-    );
+  async destroy() {
+    this.commandRegistration.abort();
+    this.stopGiveawayScheduler?.();
+    this.stopCreationRecovery?.();
+    this.stopMessageReconciliation?.();
+    try {
+      await super.destroy();
+    } finally {
+      await mongoose.disconnect();
+    }
   }
 }
 

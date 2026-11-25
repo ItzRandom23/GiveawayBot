@@ -1,25 +1,37 @@
-const { WebhookClient, PermissionFlagsBits, REST, Routes, ApplicationCommandType } = require('discord.js');
-const db = require('../models/Guild');
+const { setTimeout: delay } = require("node:timers/promises");
+const { ApplicationCommandType, InteractionContextType, Routes } = require("discord.js");
+const { logError } = require("../structures/config");
 
-/**
- * @param {import("../structures/Client")} client
- */
+module.exports = async (client, { signal, retryDelayMs = 1_000 } = {}) => {
+  if (client.cluster.id !== 0) return;
 
-module.exports = async (client) => {
-  console.log(`➜     Cluster #${client.cluster.id} is Online.`);
-  if (client.cluster.id === 0) {
-    const rest = new REST({ version: "10" }).setToken(client.token)
-    let appCommand = [];
-    client.commands.filter(({ category }) => category !== "Owner").map(({ description, name, options }) => {
-      appCommand.push({
-        name,
-        description,
-        options,
-        type: ApplicationCommandType.ChatInput,
-        dmPermission: false
-      })
-    })
-    await rest.put(Routes.applicationCommands(client.user.id), { body: appCommand });
-    client.rest = rest;
+  const body = client.commands
+    .filter(({ category }) => category !== "Owner")
+    .map(({ name, description, options }) => ({
+      name,
+      description,
+      options,
+      type: ApplicationCommandType.ChatInput,
+      contexts: [InteractionContextType.Guild],
+    }));
+
+  const route = Routes.applicationCommands(client.user.id);
+  while (!signal?.aborted) {
+    try {
+      const deadline = AbortSignal.timeout(20_000);
+      await client.rest.put(route, { body, signal: signal ? AbortSignal.any([signal, deadline]) : deadline });
+      return;
+    } catch (error) {
+      if (signal?.aborted) return;
+      logError("Slash command registration", error);
+    }
+
+    try {
+      await delay(retryDelayMs, undefined, { signal });
+    } catch (error) {
+      if (signal?.aborted) return;
+      throw error;
+    }
+    retryDelayMs = Math.min(retryDelayMs * 2, 60_000);
   }
 };

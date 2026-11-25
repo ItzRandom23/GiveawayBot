@@ -1,52 +1,32 @@
 const { ApplicationCommandOptionType } = require("discord.js");
-const gwdata = require("../../models/GiveawayData"); 
+const { runGiveawayOperation } = require("../../structures/GiveawayLifecycle");
+const { LIMITS } = require("../../structures/Util");
 
 module.exports = {
   name: "reroll",
-  description: "rerolls one new winner from a giveaway",
+  description: "Draws new winners for an ended giveaway",
   permission: "ManageGuild",
   options: [
     {
       name: "giveaway_id",
-      description: "ID of the giveaway to reroll",
+      description: "The message ID of the giveaway to reroll",
       type: ApplicationCommandOptionType.String,
       required: true,
     },
     {
       name: "count",
-      description: "number of new winners to pick",
+      description: "Number of new winners to draw",
       type: ApplicationCommandOptionType.Integer,
-      required: false,
+      min_value: 1,
+      max_value: LIMITS.maxWinners,
     },
   ],
 
-  run: async ({ client, context }) => {
-    const giveawayId = context.options.getString("giveaway_id");
-    const winnerCount = context.options.getInteger("count");
-
-    const GiveawayData = await gwdata.findOne({ messageId: giveawayId , isActive: false});
-    if(!GiveawayData) {
-        return context.createMessage({
-            content: `💥 I could not find any giveaway!`,
-            flags: 64,
-          });
+  run: async (args) => {
+    const count = args.context.options.getInteger("count");
+    if (count !== null && (!Number.isSafeInteger(count) || count < 1 || count > LIMITS.maxWinners)) {
+      return args.context.createMessage({ content: `Choose 1 to ${LIMITS.maxWinners} new winners.` });
     }
-    if (winnerCount) {
-      GiveawayData.winnersCount = winnerCount;
-      await GiveawayData.save();
-    }
-
-    if (GiveawayData.participants.length < GiveawayData.winnersCount) {
-      return context.createMessage({
-        content: `Not enough participants to pick ${winnersToPick} winners.`,
-        flags: 64,
-      });
-    }
-    await client.util.rerollGiveawayEmbed(giveawayId, GiveawayData);
-
-    return context.createMessage({
-      content: `Rerolled.`,
-      flags: 64,
-    });
+    return runGiveawayOperation(args, "reroll", count ?? undefined);
   },
 };

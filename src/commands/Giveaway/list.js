@@ -1,88 +1,85 @@
-const { EmbedBuilder } = require("discord.js");
-const gwdata = require("../../models/GiveawayData");
+const { EmbedBuilder, escapeMarkdown } = require("discord.js");
+const GiveawayData = require("../../models/GiveawayData");
+const { activeGiveawayFilter, canViewGiveaway, isSnowflake, truncate } = require("../../structures/Util");
+
+const fields = "prize endTime channelId messageId";
+const maxDescriptionLength = 4096;
+
+function formatEntry(giveaway, guildId, position) {
+  const prize = escapeMarkdown(
+    truncate(giveaway.prize || "Giveaway", 200).replace(/\s+/g, " "),
+    { maskedLink: true }
+  );
+  const link = `https://discord.com/channels/${guildId}/${giveaway.channelId}/${giveaway.messageId}`;
+  return `\`${position}.\` ${prize} • [Open](${link}) • Ends <t:${Math.floor(giveaway.endTime.getTime() / 1000)}:R>`;
+}
+
+function visibleChannels(interaction, options) {
+  const checks = new Map();
+  return (channelId) => {
+    if (!checks.has(channelId)) {
+      checks.set(channelId, canViewGiveaway(interaction, channelId, options));
+    }
+    return checks.get(channelId);
+  };
+}
 
 module.exports = {
   name: "list",
   description: "Lists active giveaways in the server",
   permission: "ViewChannel",
 
-  run: async ({ client, context, guildData }) => {
-    const activeGiveaways = await gwdata.find({
-      isActive: true,
-      id: context.guild.id,
-    });
-
-    if (!activeGiveaways.length) {
-      return await context.createMessage({
-        embeds: [
-          new EmbedBuilder()
-            .setColor("Red")
-            .setDescription(`❌ There are no active giveaways in this server.`),
-        ],
-        flags: 64,
-      });
+  async run({ client, context, guildData }) {
+    const active = activeGiveawayFilter(context.guildId);
+    const giveaways = GiveawayData.find(active)
+      .select(fields)
+      .sort({ endTime: 1, messageId: 1 })
+      .lean()
+      .cursor();
+    const canView = visibleChannels(context);
+    const pages = [];
+    let page = [];
+    let pageLength = 0;
+    let position = 0;
+    for await (const giveaway of giveaways) {
+      const { channelId, messageId } = giveaway;
+      if (!isSnowflake(messageId) || !isSnowflake(channelId) || !await canView(channelId)) continue;
+      const line = formatEntry(giveaway, context.guildId, ++position);
+      if (page.length >= 10 || pageLength + line.length + 1 > maxDescriptionLength) {
+        pages.push(page);
+        page = [];
+        pageLength = 0;
+      }
+      page.push({ messageId, position });
+      pageLength += line.length + 1;
     }
-    let pagesNum = Math.ceil(activeGiveaways.length / 10);
-    if (pagesNum === 0) pagesNum = 1;
+    if (page.length) pages.push(page);
+    if (!pages.length) return context.createMessage({ content: "There are no active giveaways you can view." });
 
-    if (activeGiveaways.length <= 10) {
-      let i = 0;
-      const list = activeGiveaways
-        .map((giveaway, index) => {
-          const endsIn = `<t:${Math.floor(
-            new Date(giveaway.endTime).getTime() / 1000
-          )}:R>`;
-          return `\`${index + 1}.\` [**${
-            giveaway.prize
-          }**](https://discord.com/channels/${context.guild.id}/${
-            giveaway.channelId
-          }/${giveaway.messageId}) (Active) • Ends: ${endsIn}`;
-        })
-        .join("\n");
-      return await context.createMessage({
-        embeds: [
-          new EmbedBuilder()
-          .setColor(guildData.embedColor)
-            .setAuthor({
-              name: `${context.guild.name}'s Active Giveaways`,
-            })
-            .setDescription(list),
-        ],
-      });
-    }
-
-    const list = [];
-    for (let i = 0; i < activeGiveaways.length; i += 10) {
-      const pageGiveaways = activeGiveaways.slice(i, i + 10);
-      list.push(
-        pageGiveaways
-          .map((giveaway, index) => {
-            const endsIn = `<t:${Math.floor(
-              new Date(giveaway.endTime).getTime() / 1000
-            )}:R>`;
-            return `\`${i + index + 1}.\` [**${
-              giveaway.prize
-            }**](https://discord.com/channels/${context.guild.id}/${
-              giveaway.channelId
-            }/${giveaway.messageId}) (Active) • Ends: ${endsIn}`;
-          })
-          .join("\n")
-      );
-    }
-
-    const embeds = [];
-    for (let i = 0; i < list.length; i++) {
-      embeds.push(
-        new EmbedBuilder()
+    const title = truncate(`${context.guild.name}'s Active Giveaways`, 256);
+    return client.util.paginate(context, pages.length, async (index, interaction) => {
+      const items = pages[index];
+      const rows = await GiveawayData.find({
+        ...active,
+        messageId: { $in: items.map(({ messageId }) => messageId) },
+      }).select(fields).lean();
+      const byMessage = new Map(rows.map((row) => [row.messageId, row]));
+      const canStillView = visibleChannels(interaction, { force: true });
+      const lines = await Promise.all(items.map(async ({ messageId, position }) => {
+        const giveaway = byMessage.get(messageId);
+        if (!giveaway || !await canStillView(giveaway.channelId)) return null;
+        return formatEntry(giveaway, context.guildId, position);
+      }));
+      const description = lines.filter(Boolean).join("\n");
+      if (!description) {
+        return { content: "There are no active giveaways you can view on this page.", embeds: [] };
+      }
+      const embed = new EmbedBuilder()
         .setColor(guildData.embedColor)
-          .setAuthor({
-            name: `${context.guild.name}'s Active Giveaways`,
-          })
-          .setDescription(list[i])
-          .setFooter({ text: `Page ${i + 1} of ${list.length}` })
-      );
-    }
-
-    return client.util.paginate(context, embeds);
+        .setAuthor({ name: title })
+        .setDescription(truncate(description, maxDescriptionLength));
+      if (pages.length > 1) embed.setFooter({ text: `Page ${index + 1} of ${pages.length}` });
+      return { content: null, embeds: [embed] };
+    });
   },
 };

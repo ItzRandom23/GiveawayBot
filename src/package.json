@@ -1,0 +1,19 @@
+{
+  "name": "giveaway-bot",
+  "version": "1.0.3",
+  "private": true,
+  "description": "Discord bot for hosting and managing giveaways.",
+  "main": "index.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord-hybrid-sharding": "3.0.1",
+    "discord.js": "14.28.1",
+    "mongoose": "9.13.1"
+  }
+}

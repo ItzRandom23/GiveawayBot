@@ -2,483 +2,380 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  ChannelType,
+  ComponentType,
   EmbedBuilder,
-  Message,
+  MessageFlags,
+  PermissionFlagsBits,
+  RESTJSONErrorCodes,
 } = require("discord.js");
-const data = require("../models/Guild");
-const gwdata = require("../models/GiveawayData");
+const Guild = require("../models/Guild");
+const GiveawayData = require("../models/GiveawayData");
 
-class Util {
-  /**
-   * @param {import('./Client')} client
-   */
-  constructor(client) {
-    this.client = client;
-  }
+const LIMITS = {
+  maxPrizeLength: 200,
+  maxDescriptionLength: 3500,
+  maxWinners: 20,
+  maxDurationSeconds: 365 * 86400,
+};
+const SECONDS_PER_UNIT = { s: 1, m: 60, h: 3600, d: 86400 };
+const SAFE_MENTIONS = { parse: [], repliedUser: false };
+const ENTRY_REFRESH_DELAY_MS = 250;
+const MAX_ENTRY_REFRESH_RETRIES = 4;
+const VIEW_PERMISSIONS = [
+  PermissionFlagsBits.ViewChannel,
+  PermissionFlagsBits.ReadMessageHistory,
+];
 
-  /**
-   * Handles giveaway button interaction
-   * @param {import('discord.js').ButtonInteraction} interaction
-   * @param {string} giveawayId
-   */
-  async handleGiveawayButton(interaction, giveawayId) {
-    const GiveawayData = await gwdata.findOne({ messageId: giveawayId });
-    if (!GiveawayData) {
-      return interaction.reply({
-        content: "Giveaway not found!",
-        flags: 64,
-      });
-    }
-
-    const guildSettings = await data.findOne({ id: interaction.guildId }) || {};
-    const userId = interaction.user.id;
-    const isParticipating = GiveawayData.participants.includes(userId);
-    const update = isParticipating
-      ? { $pull: { participants: userId }, $inc: { entryCount: -1 } }
-      : { $push: { participants: userId }, $inc: { entryCount: 1 } };
-
-    const updatedGiveawayData = await gwdata.findOneAndUpdate(
-      { messageId: giveawayId },
-      update,
-      { new: true }
-    );
-
-    await interaction.reply({
-      content: isParticipating
-        ? "You have left the giveaway!"
-        : "You have entered the giveaway!",
-      flags: 64,
-    });
-
-    this.updateGiveawayEmbed(
-      giveawayId,
-      updatedGiveawayData,
-      guildSettings.embedColor || "#0000FF"
-    );
-  }
-
-  async updateGiveawayEmbed(giveawayId, GiveawayData, embedColor = "#0000FF") {
-    try {
-      const { channelId } = GiveawayData._doc || GiveawayData;
-      if (!channelId) {
-        console.error(`Channel ID is undefined for giveaway ${giveawayId}`);
-        return;
-      }
-
-      const channel = await this.client.channels.fetch(channelId);
-      const message = await channel.messages.fetch(giveawayId);
-      const embed = this.createGiveawayEmbed(GiveawayData, embedColor);
-      await message.edit({ embeds: [embed] });
-    } catch (error) {
-      console.error(`Failed to update giveaway embed ${giveawayId}:`, error);
-    }
-  }
-
-  async fetchMessageByApi(client, channelId, messageId) {
-    try {
-        const response = await client.rest.get(
-            `/channels/${channelId}/messages/${messageId}`
-        );
-
-        return new Message(client, response, client.channels.cache.get(channelId));
-
-    } catch (error) {
-        const isUnknown =
-            error.message?.includes("Unknown Message") ||
-            error.code === 10008; 
-
-        if (isUnknown) {
-            console.log(`Message ${messageId} no longer exists. Deleting DB entry...`);
-            await gwdata.deleteOne({ messageId });
-
-        } else {
-            console.log(`Error fetching message ${messageId}: ${error}`);
-        }
-        return null;
-    }
+function messageViewPermissions(channel) {
+  return channel?.isVoiceBased?.() ? [...VIEW_PERMISSIONS, PermissionFlagsBits.Connect] : VIEW_PERMISSIONS;
 }
 
-  async checkGiveawayEnd(giveawayId) {
-    const GiveawayData = await gwdata.findOne({ messageId: giveawayId });
-    if (!GiveawayData?.isActive) return;
-    if (Date.now() < GiveawayData.endTime) return;
+const PAGE_BUTTONS = [
+  { id: "giveaway-list:first", emoji: "⏮️", style: ButtonStyle.Primary },
+  { id: "giveaway-list:previous", emoji: "⏪", style: ButtonStyle.Secondary },
+  { id: "giveaway-list:next", emoji: "⏩", style: ButtonStyle.Secondary },
+  { id: "giveaway-list:last", emoji: "⏭️", style: ButtonStyle.Primary },
+];
 
-    const channel = await this.client.channels.fetch(GiveawayData.channelId).catch(() => null);
-    if (!channel) return;
+function isSnowflake(value) {
+  return typeof value === "string" && /^\d{17,20}$/.test(value);
+}
 
-    const message = await this.fetchMessageByApi(this.client, GiveawayData.channelId, giveawayId);
-    if (!message) return;
+function truncate(value, maxLength) {
+  const text = String(value ?? "");
+  if (text.length <= maxLength) return text;
+  return text.slice(0, maxLength - 1).replace(/[\uD800-\uDBFF]$/u, "") + "…";
+}
 
-    await gwdata.updateOne({ messageId: giveawayId }, { isActive: false });
-    await this.endGiveawayEmbed(giveawayId, GiveawayData);
+function hasCommandPermission(client, interaction, permission) {
+  return (
+    !permission ||
+    interaction.memberPermissions?.has(PermissionFlagsBits[permission]) ||
+    client.owners?.includes(interaction.user.id)
+  );
+}
+
+function getPostingPermissionError(interaction) {
+  const channel = interaction.channel;
+  if (typeof channel?.send !== "function") {
+    return "Giveaways must be created in a channel that supports messages.";
   }
+  const sendPermission = channel.isThread()
+    ? PermissionFlagsBits.SendMessagesInThreads
+    : PermissionFlagsBits.SendMessages;
+  if (
+    !interaction.appPermissions?.has([
+      ...messageViewPermissions(channel),
+      sendPermission,
+      PermissionFlagsBits.EmbedLinks,
+    ])
+  ) {
+    return channel.isVoiceBased?.()
+      ? "I need View Channel, Connect, Read Message History, Embed Links, and permission to send messages here."
+      : "I need View Channel, Read Message History, Embed Links, and permission to send messages here.";
+  }
+  return null;
+}
 
-  createGiveawayEmbed(GiveawayData, color, winners = "") {
-    const { prize, endTime, hostId, entryCount, winnersCount } = GiveawayData._doc || GiveawayData;
+function getChannelVisibility(interaction, channel) {
+  if (!channel || channel.guildId !== interaction.guildId) return false;
+  const permissions = channel.permissionsFor?.(interaction.member ?? interaction.user.id);
+  if (!permissions?.has(messageViewPermissions(channel))) return false;
+  if (
+    channel.type === ChannelType.PrivateThread &&
+    !permissions.has(PermissionFlagsBits.ManageThreads)
+  ) {
+    return null;
+  }
+  return true;
+}
 
-    if (!prize || !endTime || !hostId) {
-      console.error("Invalid GiveawayData structure:", GiveawayData);
-      return new EmbedBuilder()
-        .setColor("#FF0000")
-        .setTitle("Error: Invalid Giveaway Data")
-        .setDescription("There was an issue retrieving giveaway details.");
+async function canViewGiveaway(interaction, channelId, { force = false } = {}) {
+  if (!isSnowflake(channelId) || !interaction.guild) return false;
+  if (channelId === interaction.channelId) {
+    return Boolean(interaction.memberPermissions?.has(messageViewPermissions(interaction.channel)));
+  }
+  const channel = await interaction.guild.channels.fetch(channelId, { force }).catch(() => null);
+  if (force && channel?.isThread?.() && channel.parentId) {
+    // Thread permissions are inherited from the parent, not the thread response.
+    const parent = await interaction.guild.channels.fetch(channel.parentId, { force: true }).catch(() => null);
+    if (!parent) return false;
+  }
+  const visibility = getChannelVisibility(interaction, channel);
+  if (visibility !== null) return visibility;
+
+  // Private thread membership is separate from its inherited permissions.
+  const member = await channel.members
+    .fetch({ member: interaction.user.id, force: true })
+    .catch(() => null);
+  return Boolean(member);
+}
+
+function getAutocompleteChannels(interaction) {
+  const channels = new Map();
+  if (interaction.memberPermissions?.has(messageViewPermissions(interaction.channel))) {
+    channels.set(interaction.channelId, true);
+  }
+  for (const channel of interaction.guild.channels.cache.values()) {
+    if (channel.id === interaction.channelId) continue;
+    const visibility = getChannelVisibility(interaction, channel);
+    if (visibility !== false) {
+      channels.set(channel.id, channel.type === ChannelType.PrivateThread ? null : visibility);
     }
+  }
+  return channels;
+}
 
-    const endTimestamp = Math.floor(endTime / 1000);
+function activeGiveawayFilter(guildId) {
+  return {
+    id: guildId,
+    isActive: true,
+    endTime: { $type: "date" },
+    $expr: { $gt: ["$endTime", "$$NOW"] },
+  };
+}
 
-    return new EmbedBuilder()
-      .setColor(color)
-      .setTitle(`**${prize}**`)
-      .setDescription(
-        `Ends: <t:${endTimestamp}:R> (<t:${endTimestamp}:f>)\n` +
-        `Hosted by: <@${hostId}>\n` +
-        `Entries: **${entryCount ?? 0}**\n` +
-        `Winners: **${winners || winnersCount}**`
-      )
-      .setTimestamp();
+function shouldRetryEntryRefresh(error) {
+  if ([
+    RESTJSONErrorCodes.UnknownMessage,
+    RESTJSONErrorCodes.UnknownChannel,
+    RESTJSONErrorCodes.MissingAccess,
+    RESTJSONErrorCodes.MissingPermissions,
+  ].includes(error.code)) return false;
+  return !Number.isInteger(error.status) || error.status === 429 || error.status >= 500;
+}
+
+class Util {
+  constructor(client) {
+    this.client = client;
+    this.messageOperations = new Map();
+    this.entryRefreshes = new Map();
   }
 
-  createDisabledButtonRow(giveawayEmoji = "🎉") {
+  async withGiveawayMessage(giveawayId, operation) {
+    const previous = this.messageOperations.get(giveawayId) ?? Promise.resolve();
+    const current = previous.catch(() => {}).then(operation);
+    this.messageOperations.set(giveawayId, current);
+    try {
+      return await current;
+    } finally {
+      if (this.messageOperations.get(giveawayId) === current) {
+        this.messageOperations.delete(giveawayId);
+      }
+    }
+  }
+
+  parseDuration(duration) {
+    const match = /^(\d+)([smhd])$/i.exec(duration.trim());
+    if (!match) return null;
+    const seconds = Number(match[1]) * SECONDS_PER_UNIT[match[2].toLowerCase()];
+    return Number.isSafeInteger(seconds) && seconds >= 1 && seconds <= LIMITS.maxDurationSeconds
+      ? seconds
+      : null;
+  }
+
+  createGiveawayEmbed(giveaway, color, winners) {
+    const { prize, description, startTime, endTime, hostId, winnersCount } = giveaway;
+    const endTimestamp = Math.floor(new Date(endTime).getTime() / 1000);
+    const entries = Array.isArray(giveaway.participants)
+      ? new Set(giveaway.participants).size
+      : giveaway.entryCount ?? 0;
+    const finished = winners !== undefined;
+    const winnerLabel = finished
+      ? winners.slice(0, LIMITS.maxWinners).map((id) => `<@${id}>`).join(", ") || "No valid entrants"
+      : `**${winnersCount}**`;
+    const details = [
+      `${finished ? "Ended" : "Ends"}: <t:${endTimestamp}:R> (<t:${endTimestamp}:f>)`,
+      `Hosted by: <@${hostId}>`,
+      `Entries: **${entries}**`,
+      `Winners: ${winnerLabel}`,
+    ].join("\n");
+    const descriptionLimit = Math.min(LIMITS.maxDescriptionLength, 4096 - details.length - 2);
+    const embed = new EmbedBuilder()
+      .setColor(color)
+      .setTitle(truncate(prize, 256) || "Giveaway")
+      .setDescription(description ? `${truncate(description, descriptionLimit)}\n\n${details}` : details);
+    if (startTime) embed.setTimestamp(new Date(startTime));
+    return embed;
+  }
+
+  createDisabledButtonRow(emoji = "🎉") {
     return new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId("giveawayEnded")
         .setStyle(ButtonStyle.Primary)
-        .setEmoji(giveawayEmoji)
+        .setEmoji(emoji)
         .setDisabled(true)
     );
   }
 
-  async endGiveawayEmbed(giveawayId, GiveawayData) {
-    try {
-      const channel = await this.client.channels.fetch(GiveawayData.channelId);
-      const message = await channel.messages.fetch(giveawayId);
-
-      const guildSettings = await data.findOne({ id: message.guildId }) || {};
-      const winnersData = this.getWinners(GiveawayData);
-
-      const embed = this.createGiveawayEmbed(
-        GiveawayData,
-        guildSettings.embedColor || "#313338",
-        winnersData.winners
-      );
-      const row = this.createDisabledButtonRow(guildSettings.giveawayEmoji || "🎉");
-
-      await message.edit({ embeds: [embed], components: [row] });
-      await message.reply({
-        content: winnersData.winners
-          ? `Congratulations ${winnersData.winners}! You won **${GiveawayData.prize}**!`
-          : "No valid entrants, so a winner could not be determined!",
-      });
-    } catch (error) {
-      console.error(`Failed to end giveaway ${giveawayId}:`, error);
-    }
+  async createGiveaway(options) {
+    const { createGiveaway } = require("./GiveawayCreation");
+    return createGiveaway(this.client, options);
   }
 
-  async rerollGiveawayEmbed(giveawayId, GiveawayData, winnersToPick) {
-    try {
-      const channel = await this.client.channels.fetch(GiveawayData.channelId);
-      const message = await channel.messages.fetch(giveawayId);
-
-      const guildSettings = await data.findOne({ id: message.guildId }) || {};
-      const winnersData = this.getWinners(GiveawayData, winnersToPick);
-
-      const embed = this.createGiveawayEmbed(
-        GiveawayData,
-        guildSettings.embedColor || "#313338",
-        winnersData.winners
-      );
-      const row = this.createDisabledButtonRow(guildSettings.giveawayEmoji || "🎉");
-
-      await message.edit({ embeds: [embed], components: [row] });
-      await message.reply({
-        content: winnersData.winners
-          ? `Rerolled the giveaway! New winner(s) are ${winnersData.winners}!`
-          : "No valid entrants, so a winner could not be determined!",
-      });
-    } catch (error) {
-      console.error(`Failed to reroll giveaway ${giveawayId}:`, error);
-    }
-  }
-
-  getWinners(GiveawayData, winnersToPick) {
-    if (!GiveawayData.participants.length) return { winners: "" };
-
-    const count = Math.min(
-      winnersToPick || GiveawayData.winnersCount,
-      GiveawayData.participants.length
-    );
-
-    const winnerIds = GiveawayData.participants
-      .sort(() => Math.random() - 0.5)
-      .slice(0, count);
-
-    return { winners: winnerIds.map((id) => `<@${id}>`).join(", ") };
-  }
-
-  async parseDuration(duration) {
-    duration = duration.trim();
-
-    const timeRegex = /^(\d+)(s|m|h|d)$/;
-    const match = duration.match(timeRegex);
-
-    if (!match) {
-      console.log(`Invalid duration value: ${duration}`);
-      return null;
+  queueEntryRefresh(scope, { message, guild }) {
+    const { messageId } = scope;
+    const existing = this.entryRefreshes.get(messageId);
+    if (existing) {
+      existing.dirty = true;
+      return;
     }
 
-    const amount = parseInt(match[1]);
-    const unit = match[2];
+    const refresh = { dirty: true, failures: 0 };
+    this.entryRefreshes.set(messageId, refresh);
 
-    switch (unit) {
-      case "s":
-        return amount; // seconds
-      case "m":
-        return amount * 60; // minutes to seconds
-      case "h":
-        return amount * 3600; // hours to seconds
-      case "d":
-        return amount * 86400; // days to seconds
-      default:
-        return null;
-    }
-  }
-
-  /**
-    *
-    * @param {import("discord.js").Interaction | import("discord.js").Message} context
-    * @param {Array<EmbedBuilder>} embeds
-    */
-
-  async paginate(context, embeds) {
-    let currentPage = 0;
-    const message =
-      context instanceof Message ? await context.channel.send({
-        embeds: [
-          embeds[currentPage]
-        ],
-        components: [
-          new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-              .setStyle(ButtonStyle.Primary)
-              .setCustomId("1")
-              .setEmoji({ name: "⏮️" })
-              .setDisabled(true),
-            new ButtonBuilder()
-              .setStyle(ButtonStyle.Secondary)
-              .setCustomId("2")
-              .setEmoji({ name: "⏪" })
-              .setDisabled(true),
-            new ButtonBuilder()
-              .setStyle(ButtonStyle.Secondary)
-              .setCustomId("3")
-              .setEmoji({ name: "⏩" }),
-            new ButtonBuilder()
-              .setStyle(ButtonStyle.Primary)
-              .setCustomId("4")
-              .setEmoji({ name: "⏭️" })
-          ),
-        ],
-      })
-        : await context.followUp({
-          embeds: [
-            embeds[currentPage]
-          ],
-          components: [
-            new ActionRowBuilder().addComponents(
-              new ButtonBuilder()
-                .setStyle(ButtonStyle.Primary)
-                .setCustomId("1")
-                .setEmoji({ name: "⏮️" })
-                .setDisabled(true),
-              new ButtonBuilder()
-                .setStyle(ButtonStyle.Secondary)
-                .setCustomId("2")
-                .setEmoji({ name: "⏪" })
-                .setDisabled(true),
-              new ButtonBuilder()
-                .setStyle(ButtonStyle.Secondary)
-                .setCustomId("3")
-                .setEmoji({ name: "⏩" }),
-              new ButtonBuilder()
-                .setStyle(ButtonStyle.Primary)
-                .setCustomId("4")
-                .setEmoji({ name: "⏭️" })
-            ),
-          ],
+    const run = async () => {
+      try {
+        const isActive = await this.withGiveawayMessage(messageId, async () => {
+          // Include entries that were committed while the refresh waited for the lock.
+          refresh.dirty = false;
+          const latest = await GiveawayData.findOne(scope)
+            .select("prize description startTime endTime hostId winnersCount entryCount").lean();
+          if (!latest) return false;
+          if (latest.entryCount === refresh.lastCount) return true;
+          const settings = await Guild.getSettings(scope.id, guild, message.channel);
+          await message.edit({
+            embeds: [this.createGiveawayEmbed(latest, settings.embedColor)],
+            allowedMentions: SAFE_MENTIONS,
+          });
+          refresh.lastCount = latest.entryCount;
+          return true;
         });
-    const collector = message.createMessageComponentCollector({
-      time: 300000,
-      filter: ({ member: { id: memberId } }) => memberId === context.member.id,
-    });
-    collector.on("collect",
-      /**
-       * 
-       * @param {import('discord.js').ButtonInteraction} interaction
-       * @returns 
-       */
-      async (interaction) => {
-        switch (interaction.customId) {
-          case "1": {
-            await interaction.deferUpdate();
-            currentPage = 0;
-            return message.edit({
-              embeds: [
-                embeds[currentPage]
-              ],
-              components: [
-                new ActionRowBuilder().addComponents(
-                  new ButtonBuilder()
-                    .setStyle(ButtonStyle.Primary)
-                    .setCustomId("1")
-                    .setEmoji({ name: "⏮️" })
-                    .setDisabled(true),
-                  new ButtonBuilder()
-                    .setStyle(ButtonStyle.Secondary)
-                    .setCustomId("2")
-                    .setEmoji({ name: "⏪" })
-                    .setDisabled(true),
-                  new ButtonBuilder()
-                    .setStyle(ButtonStyle.Secondary)
-                    .setCustomId("3")
-                    .setEmoji({ name: "⏩" }),
-                  new ButtonBuilder()
-                    .setStyle(ButtonStyle.Primary)
-                    .setCustomId("4")
-                    .setEmoji({ name: "⏭️" })
-                ),
-              ],
-            });
-          }
-          case "2": {
-            await interaction.deferUpdate();
-            --currentPage;
-            return message.edit({
-              embeds: [
-                embeds[currentPage]
-              ],
-              components: [
-                new ActionRowBuilder().addComponents(
-                  new ButtonBuilder()
-                    .setStyle(ButtonStyle.Primary)
-                    .setCustomId("1")
-                    .setEmoji({ name: "⏮️" })
-                    .setDisabled(currentPage === 0),
-                  new ButtonBuilder()
-                    .setStyle(ButtonStyle.Secondary)
-                    .setCustomId("2")
-                    .setEmoji({ name: "⏪" })
-                    .setDisabled(currentPage === 0),
-                  new ButtonBuilder()
-                    .setStyle(ButtonStyle.Secondary)
-                    .setCustomId("3")
-                    .setEmoji({ name: "⏩" })
-                    .setDisabled(false),
-                  new ButtonBuilder()
-                    .setStyle(ButtonStyle.Primary)
-                    .setCustomId("4")
-                    .setEmoji({ name: "⏭️" })
-                    .setDisabled(false)
-                ),
-              ],
-            });
-          }
-          case "3": {
-            await interaction.deferUpdate();
-            currentPage++;
-            return message.edit({
-              embeds: [
-                embeds[currentPage]
-              ],
-              components: [
-                new ActionRowBuilder().addComponents(
-                  new ButtonBuilder()
-                    .setStyle(ButtonStyle.Primary)
-                    .setCustomId("1")
-                    .setEmoji({ name: "⏮️" })
-                    .setDisabled(false),
-                  new ButtonBuilder()
-                    .setStyle(ButtonStyle.Secondary)
-                    .setCustomId("2")
-                    .setEmoji({ name: "⏪" })
-                    .setDisabled(false),
-                  new ButtonBuilder()
-                    .setStyle(ButtonStyle.Secondary)
-                    .setCustomId("3")
-                    .setEmoji({ name: "⏩" })
-                    .setDisabled(currentPage === embeds.length - 1),
-                  new ButtonBuilder()
-                    .setStyle(ButtonStyle.Primary)
-                    .setCustomId("4")
-                    .setEmoji({ name: "⏭️" })
-                    .setDisabled(currentPage === embeds.length - 1)
-                ),
-              ],
-            });
-          }
-          case "4": {
-            await interaction.deferUpdate();
-            currentPage = embeds.length - 1;
-            return message.edit({
-              embeds: [
-                embeds[currentPage]
-              ],
-              components: [
-                new ActionRowBuilder().addComponents(
-                  new ButtonBuilder()
-                    .setStyle(ButtonStyle.Primary)
-                    .setCustomId("1")
-                    .setEmoji({ name: "⏮️" }),
-                  new ButtonBuilder()
-                    .setStyle(ButtonStyle.Secondary)
-                    .setCustomId("2")
-                    .setEmoji({ name: "⏪" }),
-                  new ButtonBuilder()
-                    .setStyle(ButtonStyle.Secondary)
-                    .setCustomId("3")
-                    .setEmoji({ name: "⏩" })
-                    .setDisabled(true),
-                  new ButtonBuilder()
-                    .setStyle(ButtonStyle.Primary)
-                    .setCustomId("4")
-                    .setEmoji({ name: "⏭️" })
-                    .setDisabled(true)
-                ),
-              ],
-            });
-          }
+        refresh.failures = 0;
+        if (isActive && refresh.dirty) {
+          setTimeout(run, ENTRY_REFRESH_DELAY_MS).unref();
+          return;
         }
-      });
-    collector.on("end", () => {
-      return message
-        .edit({
-          components: [
-            new ActionRowBuilder().addComponents(
-              new ButtonBuilder()
-                .setStyle(ButtonStyle.Primary)
-                .setCustomId("1")
-                .setEmoji({ name: "⏮️" })
-                .setDisabled(true),
-              new ButtonBuilder()
-                .setStyle(ButtonStyle.Secondary)
-                .setCustomId("2")
-                .setEmoji({ name: "⏪" })
-                .setDisabled(true),
-              new ButtonBuilder()
-                .setStyle(ButtonStyle.Secondary)
-                .setCustomId("3")
-                .setEmoji({ name: "⏩" })
-                .setDisabled(true),
-              new ButtonBuilder()
-                .setStyle(ButtonStyle.Primary)
-                .setCustomId("4")
-                .setEmoji({ name: "⏭️" })
-                .setDisabled(true)
-            ),
-          ],
-        })
-        .catch(() => null);
-    });
+      } catch (error) {
+        if (shouldRetryEntryRefresh(error) && refresh.failures < MAX_ENTRY_REFRESH_RETRIES) {
+          refresh.failures += 1;
+          // Backoff happens outside the lock so ending the giveaway sees no retry backlog.
+          setTimeout(run, ENTRY_REFRESH_DELAY_MS * 2 ** refresh.failures).unref();
+          return;
+        }
+        console.error(`Could not update giveaway entry count for ${messageId}.`, error.code ?? error.name);
+      }
+      this.entryRefreshes.delete(messageId);
+    };
+
+    setTimeout(run, ENTRY_REFRESH_DELAY_MS).unref();
   }
 
+  async handleGiveawayButton(interaction) {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const userId = interaction.user.id;
+    const scope = {
+      ...activeGiveawayFilter(interaction.guildId),
+      channelId: interaction.channelId,
+      messageId: interaction.message.id,
+    };
+    // Both the participant toggle and its count are computed from the same document version.
+    const participants = { $ifNull: ["$participants", []] };
+    const updated = await GiveawayData.findOneAndUpdate(
+      scope,
+      [
+        {
+          $set: {
+            participants: {
+              $cond: [
+                { $in: [userId, participants] },
+                { $setDifference: [participants, [userId]] },
+                { $setUnion: [participants, [userId]] },
+              ],
+            },
+          },
+        },
+        { $set: { entryCount: { $size: "$participants" } } },
+      ],
+      { returnDocument: "before", updatePipeline: true }
+    ).select({ _id: 0, participants: { $elemMatch: { $eq: userId } } }).lean();
+
+    if (!updated) {
+      const { isGiveawayOpening } = require("./GiveawayCreation");
+      const opening = await isGiveawayOpening(scope.id, scope.channelId, scope.messageId);
+      return interaction.editReply(opening
+        ? "This giveaway is still opening. Try again in a moment."
+        : "This giveaway is closed or no longer exists.");
+    }
+
+    this.queueEntryRefresh(scope, interaction);
+    return interaction.editReply(updated.participants?.length
+      ? "You have left the giveaway!"
+      : "You have entered the giveaway!");
+  }
+
+  async paginate(context, pageCount, renderPage) {
+    const firstPage = await renderPage(0, context);
+    if (pageCount === 1) return context.createMessage(firstPage);
+
+    let currentPage = 0;
+    let pendingEdit = Promise.resolve();
+    const lastPage = pageCount - 1;
+    const componentsForPage = () => [
+      new ActionRowBuilder().addComponents(
+        PAGE_BUTTONS.map(({ id, emoji, style }, index) =>
+          new ButtonBuilder()
+            .setCustomId(id)
+            .setStyle(style)
+            .setEmoji(emoji)
+            .setDisabled(index < 2 ? currentPage === 0 : currentPage === lastPage)
+        )
+      ),
+    ];
+    const message = await context.createMessage({
+      ...firstPage,
+      components: componentsForPage(),
+    });
+    const collector = message.createMessageComponentCollector({
+      componentType: ComponentType.Button,
+      time: 5 * 60_000,
+      filter: (interaction) =>
+        interaction.user.id === context.user.id &&
+        PAGE_BUTTONS.some(({ id }) => id === interaction.customId),
+    });
+
+    collector.on("collect", (interaction) => {
+      const acknowledged = interaction.deferUpdate().catch(() => false);
+      pendingEdit = pendingEdit
+        .then(async () => {
+          if ((await acknowledged) === false) return;
+          switch (interaction.customId) {
+            case "giveaway-list:first":
+              currentPage = 0;
+              break;
+            case "giveaway-list:previous":
+              currentPage = Math.max(0, currentPage - 1);
+              break;
+            case "giveaway-list:next":
+              currentPage = Math.min(lastPage, currentPage + 1);
+              break;
+            case "giveaway-list:last":
+              currentPage = lastPage;
+          }
+          const page = await renderPage(currentPage, interaction);
+          await interaction.editReply({
+            ...page,
+            components: componentsForPage(),
+          });
+        })
+        .catch((error) => console.error("Could not change the giveaway list page.", error.code));
+    });
+    collector.on("end", () => {
+      pendingEdit.then(() => context.editReply({ components: [] })).catch(() => {});
+    });
+    return message;
+  }
 }
+
 module.exports = Util;
+module.exports.LIMITS = LIMITS;
+module.exports.SAFE_MENTIONS = SAFE_MENTIONS;
+module.exports.activeGiveawayFilter = activeGiveawayFilter;
+module.exports.canViewGiveaway = canViewGiveaway;
+module.exports.getAutocompleteChannels = getAutocompleteChannels;
+module.exports.getPostingPermissionError = getPostingPermissionError;
+module.exports.hasCommandPermission = hasCommandPermission;
+module.exports.isSnowflake = isSnowflake;
+module.exports.truncate = truncate;

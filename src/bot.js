@@ -1,19 +1,25 @@
-const { EmbedBuilder } = require("discord.js");
-const { inspect } = require('util');
-new (require("./structures/Client"))().build();
+const GiveawayBot = require("./structures/Client");
+const { loadConfig, logError } = require("./structures/config");
 
-process.removeAllListeners("warning");
+async function start() {
+  const config = loadConfig();
+  if (!config) throw new Error("Missing bot configuration");
+  const client = new GiveawayBot(config);
+  process.once("disconnect", () => {
+    client.destroy()
+      .catch((error) => logError("Worker shutdown", error))
+      .finally(() => process.exit());
+  });
 
-process.on("unhandledRejection", async (err, promise) => {
-  if (!String(err).includes("Unknown interaction") && !String(err).includes("Missing Access") && !String(err).includes("Missing Permissions") && !String(err).includes("Unknown Message") && !String(err).includes("InteractionAlreadyReplied") && !String(err).includes("Unknown Member")) {
-    console.log("Unhandled Rejection:", err);
-    console.log("Promise:", promise);
+  try {
+    await client.build();
+  } catch (error) {
+    await client.destroy().catch((failure) => logError("Startup cleanup", failure));
+    throw error;
   }
-});
+}
 
-process.on("uncaughtException", async (err, promise) => {
-  if (!String(err).includes("Unknown interaction") && !String(err).includes("Missing Access") && !String(err).includes("Missing Permissions") && !String(err).includes("Unknown Message") && !String(err).includes("InteractionAlreadyReplied") && !String(err).includes("Unknown Member")) {
-    console.log("Uncaught Exception:", err);
-    console.log("Promise:", promise);
-  }
+start().catch((error) => {
+  logError("Worker startup", error);
+  process.exit(1);
 });

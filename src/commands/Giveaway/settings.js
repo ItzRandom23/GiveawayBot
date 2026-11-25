@@ -1,16 +1,14 @@
-const data = require("../../models/Guild");
+const Guild = require("../../models/Guild");
 
 module.exports = {
   name: "settings",
-  description: "Configure the giveaway settings",
+  description: "Show the giveaway settings",
   permission: "ManageGuild",
 
-  run: async ({ client, context }) => {
-    const guildData = await data.findOne({ id: context.guildId });
+  run: async ({ context }) => {
+    const { embedColor, giveawayEmoji } = await Guild.getSettings(context.guildId, context.guild, context.channel);
     return context.createMessage({
-      content: `<:yay:1310201036732104746> **Current Giveaway Settings:**
-        - Color: ${guildData?.embedColor || "Not set"} \n
-        - Emoji: ${guildData?.giveawayEmoji || "Not set"}`,
+      content: `**Giveaway settings**\nColor: ${embedColor}\nEmoji: ${giveawayEmoji}`,
     });
   },
 };

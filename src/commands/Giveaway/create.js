@@ -1,145 +1,117 @@
 const {
   ActionRowBuilder,
+  DiscordjsErrorCodes,
+  LabelBuilder,
+  MessageFlags,
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
-  EmbedBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  time,
 } = require("discord.js");
-const data = require("../../models/Guild");
-const GiveawayData = require("../../models/GiveawayData");
+const Guild = require("../../models/Guild");
+const {
+  getPostingPermissionError,
+  hasCommandPermission,
+  LIMITS,
+  SAFE_MENTIONS,
+} = require("../../structures/Util");
+
+const PERMISSION = "ManageGuild";
+
+function buildModal(customId) {
+  const modal = new ModalBuilder().setCustomId(customId).setTitle("Create a Giveaway");
+  const fields = [
+    { id: "duration", label: "Duration", placeholder: "Examples: 30m, 1h, 2d", maxLength: 10 },
+    { id: "winnerno", label: "Number of Winners", maxLength: String(LIMITS.maxWinners).length },
+    { id: "prize", label: "Prize", maxLength: LIMITS.maxPrizeLength },
+    { id: "description", label: "Description", maxLength: LIMITS.maxDescriptionLength, optional: true },
+  ];
+  for (const { id, label, placeholder, maxLength, optional } of fields) {
+    const input = new TextInputBuilder()
+      .setCustomId(id)
+      .setStyle(optional ? TextInputStyle.Paragraph : TextInputStyle.Short)
+      .setMaxLength(maxLength)
+      .setRequired(!optional);
+    if (placeholder) input.setPlaceholder(placeholder);
+    if (LabelBuilder && typeof modal.addLabelComponents === "function") {
+      modal.addLabelComponents(new LabelBuilder().setLabel(label).setTextInputComponent(input));
+    } else {
+      modal.addComponents(new ActionRowBuilder().addComponents(input.setLabel(label)));
+    }
+  }
+  return modal;
+}
 
 module.exports = {
   name: "create",
   description: "Starts a giveaway (interactive)",
-  permission: "ManageGuild",
+  permission: PERMISSION,
 
-  run: async ({ client, context, guildData }) => {
-    const modal = new ModalBuilder()
-      .setCustomId(`giveawayModal-${context.user.id}`)
-      .setTitle("Create a Giveaway");
+  async run({ client, context }) {
+    const customId = `giveaway-create:${context.id}`;
+    await context.showModal(buildModal(customId));
 
-    const durationInput = new TextInputBuilder()
-      .setCustomId("duration")
-      .setLabel("Duration")
-      .setStyle(TextInputStyle.Short)
-      .setPlaceholder("Enter duration (e.g., 1h, 30m, 2d)")
-      .setRequired(true);
-
-    const winnersInput = new TextInputBuilder()
-      .setCustomId("winnerno")
-      .setLabel("Number of Winners")
-      .setStyle(TextInputStyle.Short)
-      .setPlaceholder("Enter number of winners (e.g., 1, 2, 3)")
-      .setRequired(true);
-
-    const prizeInput = new TextInputBuilder()
-      .setCustomId("prize")
-      .setLabel("Prize")
-      .setStyle(TextInputStyle.Short)
-      .setPlaceholder("Enter the prize (e.g., Gift Card, Role, etc.)")
-      .setRequired(true);
-
-    const descriptionInput = new TextInputBuilder()
-      .setCustomId("description")
-      .setLabel("Description")
-      .setStyle(TextInputStyle.Paragraph)
-      .setPlaceholder("Provide additional details about the giveaway")
-      .setRequired(false);
-
-    modal.addComponents(
-      new ActionRowBuilder().addComponents(durationInput),
-      new ActionRowBuilder().addComponents(winnersInput),
-      new ActionRowBuilder().addComponents(prizeInput),
-      new ActionRowBuilder().addComponents(descriptionInput)
-    );
-
-    await context.showModal(modal);
-
-    const filter = (i) =>
-      i.customId === `giveawayModal-${context.user.id}` &&
-      i.user.id === context.user.id;
+    let submission;
+    try {
+      submission = await context.awaitModalSubmit({
+        filter: (interaction) =>
+          interaction.customId === customId &&
+          interaction.user.id === context.user.id &&
+          interaction.guildId === context.guildId &&
+          interaction.channelId === context.channelId,
+        time: 5 * 60_000,
+      });
+    } catch (error) {
+      if (error.code === DiscordjsErrorCodes.InteractionCollectorError) return;
+      throw error;
+    }
+    await submission.deferReply({ flags: MessageFlags.Ephemeral });
 
     try {
-      const modalInteraction = await context.awaitModalSubmit({
-        filter,
-        time: 300_000
-      });
-      
+      if (!hasCommandPermission(client, submission, PERMISSION)) {
+        return await submission.editReply("You need the Manage Server permission to create a giveaway.");
+      }
+      const permissionError = getPostingPermissionError(submission);
+      if (permissionError) return await submission.editReply(permissionError);
 
-      const duration = modalInteraction.fields.getTextInputValue("duration");
-      const winnersCount =
-        modalInteraction.fields.getTextInputValue("winnerno");
-      const prize = modalInteraction.fields.getTextInputValue("prize");
-      const description =
-        modalInteraction.fields.getTextInputValue("description");
+      const seconds = client.util.parseDuration(submission.fields.getTextInputValue("duration"));
+      const winnersInput = submission.fields.getTextInputValue("winnerno").trim();
+      const winnersCount = Number(winnersInput);
+      const prize = submission.fields.getTextInputValue("prize").trim();
+      const description = submission.fields.getTextInputValue("description").trim();
 
-      const durationMs = await client.util.parseDuration(duration);
-
-      if (!durationMs) {
-        return modalInteraction.reply({
-          content:
-            "Invalid duration format! Use formats like `1h`, `30m`, `2d`.",
-          flags: 64,
-        });
+      if (seconds === null) {
+        return await submission.editReply("Enter a duration from 1 second through 365 days, such as `30m`, `1h`, or `2d`.");
+      }
+      if (!/^\d+$/.test(winnersInput) || winnersCount < 1 || winnersCount > LIMITS.maxWinners) {
+        return await submission.editReply(`Enter a whole number from 1 to ${LIMITS.maxWinners} for the winner count.`);
+      }
+      if (!prize || prize.length > LIMITS.maxPrizeLength || description.length > LIMITS.maxDescriptionLength) {
+        return await submission.editReply(
+          `Enter a prize up to ${LIMITS.maxPrizeLength} characters and an optional description up to ${LIMITS.maxDescriptionLength} characters.`
+        );
       }
 
-      const endTime = Date.now() + durationMs * 1000;
-
-      const embed = new EmbedBuilder()
-      .setColor(guildData.embedColor)
-        .setTitle(`**${prize}**`)
-        .setDescription(
-          `${description}\n\nEnds: <t:${Math.floor(
-            endTime / 1000
-          )}:R> (<t:${Math.floor(endTime / 1000)}:f>)\nHosted by: <@${
-            context.user.id
-          }>\nEntries: **0**\nWinners: **${winnersCount}**`
-        )
-        .setTimestamp();
-
-      const emoji = guildData.giveawayEmoji;
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId("enterGiveaway")
-          .setStyle(ButtonStyle.Primary)
-          .setEmoji(emoji)
-      );
-
-      const message = await context.channel.send({
-        embeds: [embed],
-        components: [row],
-      });
-
-      const giveaway = new GiveawayData({
-        id: context.guild.id,
-        channelId: context.channel.id,
-        description,
-        messageId: message.id,
+      const guildData = await Guild.getSettings(submission.guildId, submission.guild, submission.channel);
+      const message = await client.util.createGiveaway({
+        requestId: submission.id,
+        channel: submission.channel,
+        guildData,
+        userId: submission.user.id,
         prize,
-        hostId: context.user.id,
+        description,
+        seconds,
         winnersCount,
-        startTime: Date.now(),
-        endTime,
-        participants: [],
-        isActive: true,
-        entryCount: 0,
       });
-
-      await giveaway.save();
-
-      await modalInteraction.reply({
-        content: `Giveaway successfully created! **ID:** ${message.id}`,
-        flags: 64,
+      const content = message.pending
+        ? `Giveaway creation is queued.${message.id ? ` Message ID: ${message.id}` : ""}`
+        : `Giveaway successfully created! **ID:** ${message.id}`;
+      return await submission.editReply({
+        content,
+        allowedMentions: SAFE_MENTIONS,
       });
-    } catch (err) {
-      console.error(`Error handling modal submission: ${err}`);
-      return context.followUp({
-        content: "You did not submit the form in time!",
-        flags: 64,
-      });
+    } catch (error) {
+      console.error("Failed to handle giveaway creation form.", error.code ?? error.name);
+      return await submission.editReply("The giveaway request could not be completed.").catch(() => {});
     }
   },
 };
